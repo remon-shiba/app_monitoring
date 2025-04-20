@@ -2,29 +2,37 @@ package ctrlMonitor
 
 import (
 	"app_monitor/pkg/config"
-	mdlMonitor "app_monitor/pkg/services/monitoring/model"
 	scpMonitor "app_monitor/pkg/services/monitoring/script"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	utils_v1 "github.com/FDSAP-Git-Org/hephaestus/utils/v1"
 )
 
 func HealthCheckStatus() {
+	var wg sync.WaitGroup
 	isRunning := config.IsAppOn
 	if isRunning {
 		ctr := 0
+		fmt.Println("HEALTH CHECK STATUS: ", time.Now().Format("2006-01-02 15:04:05"))
 		for {
+			wg.Add(1)
+			fmt.Println("COUNTER: ", ctr)
 			// SEND REQUEST
 			go CheckStatusV3(config.AppList[ctr].Url, ctr, time.Second*5)
+			defer wg.Done()
 			ctr++
 			if ctr == len(config.AppList) {
 				break
 			}
 		}
-		time.Sleep(time.Second * 5)
+		wg.Wait()
+		// time.Sleep(time.Second * 1)
 		HealthCheckStatus()
 	}
 }
@@ -51,20 +59,20 @@ func CheckStatus(url string, ctr int) {
 
 func CheckStatusV2(url string, ctr int, interval time.Duration) {
 	for {
-		start := time.Now()
+		// start := time.Now()
 		resp, err := http.Get(url)
-		duration := time.Since(start)
+		// duration := time.Since(start)
 
 		config.Mu.Lock()
 
 		if err == nil {
 			if resp.StatusCode >= 400 {
-				fmt.Printf("APP ID: %v | NAME: %v | URL: %v | STATUS: %v | DURATION: %v\n", config.AppList[ctr].AppId, config.AppList[ctr].Name, config.AppList[ctr].Url, resp.StatusCode, duration)
+				fmt.Printf("APP ID: %v | NAME: %v | URL: %v | STATUS: %v\n", config.AppList[ctr].AppId, config.AppList[ctr].Name, config.AppList[ctr].Url, http.StatusText(resp.StatusCode))
 			} else {
-				fmt.Printf("APP ID: %v | NAME: %v | URL: %v | STATUS: %v | DURATION: %v\n", config.AppList[ctr].AppId, config.AppList[ctr].Name, config.AppList[ctr].Url, "RUNNING", duration)
+				fmt.Printf("APP ID: %v | NAME: %v | URL: %v | STATUS: %v\n", config.AppList[ctr].AppId, config.AppList[ctr].Name, config.AppList[ctr].Url, http.StatusText(resp.StatusCode))
 			}
 		} else {
-			fmt.Printf("APP ID: %v | NAME: %v | URL: %v | STATUS: %v | DURATION: %v\n", config.AppList[ctr].AppId, config.AppList[ctr].Name, config.AppList[ctr].Url, "DOWN", duration)
+			fmt.Printf("APP ID: %v | NAME: %v | URL: %v | STATUS: %v\n", config.AppList[ctr].AppId, config.AppList[ctr].Name, config.AppList[ctr].Url, "DOWN")
 		}
 
 		config.Mu.Unlock()
@@ -73,16 +81,7 @@ func CheckStatusV2(url string, ctr int, interval time.Duration) {
 
 func CheckStatusV3(url string, ctr int, interval time.Duration) {
 	for {
-		start := time.Now()
-
-		var app mdlMonitor.AppDetails
-
-		// Lock only while reading shared config
-		config.Mu.RLock()
-		if ctr >= 0 && ctr < len(config.AppList) {
-			app = config.AppList[ctr]
-		}
-		config.Mu.RUnlock()
+		// start := time.Now()
 
 		req, err := http.NewRequest(http.MethodGet, url, nil)
 		if err != nil {
@@ -95,12 +94,24 @@ func CheckStatusV3(url string, ctr int, interval time.Duration) {
 
 		// Send the request
 		resp, err := client.Do(req)
-		duration := time.Since(start)
+		// duration := time.Since(start)
 		if err != nil {
-			fmt.Printf("APP ID: %v | NAME: %v | URL: %v | STATUS: %v | DURATION: %v\n",
-				app.AppId, app.Name, app.Url, "TIMEOUT", duration)
+			if strings.Contains(err.Error(), "context deadline exceeded") {
+				fmt.Printf("%v - APP ID: %v | STATUS: %v | ERROR: %v\n", time.Now().Format("2006-01-02 15:04:05"),
+					config.AppList[ctr].AppId, "TIMEOUT", err.Error())
+			}
+			if strings.Contains(err.Error(), " No connection") {
+				fmt.Printf("%v - APP ID: %v | STATUS: %v | ERROR: %v\n", time.Now().Format("2006-01-02 15:04:05"),
+					config.AppList[ctr].AppId, "NO CONNECTION", err.Error())
+			}
 		} else {
-			defer resp.Body.Close()
+
+			// Read response body
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				fmt.Println("error reading response body:", err)
+			}
+			resp.Body.Close()
 
 			// Output the result
 			status := "DOWN"
@@ -114,8 +125,8 @@ func CheckStatusV3(url string, ctr int, interval time.Duration) {
 
 			}
 
-			fmt.Printf("APP ID: %v | NAME: %v | URL: %v | STATUS: %v | DURATION: %v\n",
-				app.AppId, app.Name, app.Url, status, duration)
+			fmt.Printf("%v - APP ID: %v | STATUS: %v | RESPONSE: %v\n", time.Now().Format("2006-01-02 15:04:05"),
+				config.AppList[ctr].AppId, status, string(body))
 		}
 
 	}
